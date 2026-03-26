@@ -12,9 +12,16 @@ export async function POST(request: Request) {
   try {
     const token = request.headers.get('x-nexano-token')
     const body = await request.json()
-    const { email, name, cpf } = body
 
-    // 1. Mapeamento de Tokens (Cadastre estes nomes na Vercel)
+    // LOG CRÍTICO: Veja isso no painel da Vercel (Logs do Deployment)
+    console.log("--- PAYLOAD RECEBIDO DA NEXANO ---")
+    console.log(JSON.stringify(body, null, 2))
+
+    // Tenta pegar os dados de vários lugares possíveis (Nexano varia conforme a versão)
+    const email = body.email || body.customer?.email || body.data?.customer?.email || body.data?.email
+    const name = body.name || body.customer?.name || body.data?.customer?.name || body.data?.name
+    const cpf = body.cpf || body.customer?.document || body.data?.customer?.document || body.data?.cpf
+
     const TOKENS = {
       APPROVED: process.env.NEXANO_TOKEN_APPROVED,
       CANCELED: process.env.NEXANO_TOKEN_CANCELED,
@@ -22,69 +29,63 @@ export async function POST(request: Request) {
       DISPUTED: process.env.NEXANO_TOKEN_DISPUTED
     }
 
-    // 2. Lógica de Decisão baseada no Token enviado
+    if (!email) {
+      console.error("ERRO: Email não encontrado no corpo da requisição.")
+      return NextResponse.json({ error: "Email ausente no payload" }, { status: 400 })
+    }
+
     switch (token) {
       case TOKENS.APPROVED:
         return await handleApproval(email, name, cpf)
-
       case TOKENS.CANCELED:
       case TOKENS.REFUNDED:
       case TOKENS.DISPUTED:
         return await handleSuspension(email)
-
       default:
-        return NextResponse.json({ error: 'Token inválido ou não configurado' }, { status: 401 })
+        console.error("ERRO: Token não reconhecido:", token)
+        return NextResponse.json({ error: 'Token inválido' }, { status: 401 })
     }
   } catch (error: any) {
-    return NextResponse.json({ error: error.message }, { status: 400 })
+    console.error("ERRO GLOBAL WEBHOOK:", error.message)
+    return NextResponse.json({ error: error.message }, { status: 500 })
   }
 }
 
-// FUNÇÃO PARA APROVAR/CRIAR ACESSO
 async function handleApproval(email: string, name: string, cpf: string) {
-  const password = cpf.replace(/\D/g, '')
+  // Se o CPF não vier, usamos uma senha padrão ou o próprio email
+  const password = cpf ? cpf.replace(/\D/g, '') : email.split('@')[0] + '123'
   
-  // Criar ou reativar usuário no Auth
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
-    user_metadata: { full_name: name }
+    user_metadata: { full_name: name || 'Usuário SyncPro' }
   })
 
-  // Se já existe, apenas garantimos que o perfil esteja 'active'
-  if (authError && authError.message.includes('already exists')) {
-     const { data: existingUser } = await supabaseAdmin.from('profiles').select('id').eq('email', email).single()
-     if (existingUser) {
-        await supabaseAdmin.from('profiles').update({ status: 'active' }).eq('id', existingUser.id)
-     }
-     return NextResponse.json({ message: 'Usuário reativado' })
+  if (authError) {
+    if (authError.message.includes('already exists')) {
+       // Se já existe, garante que está ativo
+       const { data: user } = await supabaseAdmin.from('profiles').select('id').eq('email', email).single()
+       if (user) await supabaseAdmin.from('profiles').update({ status: 'active' }).eq('id', user.id)
+       return NextResponse.json({ message: 'Acesso reativado' })
+    }
+    throw authError
   }
 
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase()
   await supabaseAdmin.from('profiles').insert({
     id: authUser.user?.id,
-    full_name: name,
+    full_name: name || 'Usuário SyncPro',
     role: 'personal',
     invite_code: inviteCode,
-    status: 'active'
+    status: 'active',
+    email: email // Guardamos o email em profiles para facilitar suspensões
   })
 
   return NextResponse.json({ message: 'Acesso liberado' })
 }
 
-// FUNÇÃO PARA SUSPENDER ACESSO
 async function handleSuspension(email: string) {
-  // Buscamos o ID do usuário pelo email
-  const { data: user } = await supabaseAdmin
-    .from('profiles')
-    .select('id')
-    .eq('email', email) // Certifique-se de que a coluna email existe em profiles ou use rpc
-    .single()
-
-  if (user) {
-    await supabaseAdmin.from('profiles').update({ status: 'suspended' }).eq('id', user.id)
-  }
-
+  await supabaseAdmin.from('profiles').update({ status: 'suspended' }).eq('email', email)
   return NextResponse.json({ message: 'Acesso suspenso' })
 }
