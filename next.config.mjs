@@ -1,7 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // Isso ajuda a evitar erros de compilação com o Supabase no lado do servidor
-  serverExternalPackages: ['@supabase/supabase-js'],
+  experimental: {
+    // No Next 14.1, essa opção fica dentro de experimental
+    serverComponentsExternalPackages: ['@supabase/supabase-js'],
+  },
 };
 
 export default nextConfig;
