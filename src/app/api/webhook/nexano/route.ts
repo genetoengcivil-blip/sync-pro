@@ -12,13 +12,12 @@ export async function POST(request: Request) {
   try {
     const body = await request.json();
 
-    // --- LOG PARA CONFERÊNCIA ---
-    console.log(">>> [PRODUÇÃO] Processando evento:", body.event);
-    console.log(">>> [PRODUÇÃO] Token recebido no corpo:", body.token);
+    // LOGS DE APOIO (Confira na aba Logs da Vercel)
+    console.log(">>> [WEBHOOK] Evento:", body.event);
+    console.log(">>> [WEBHOOK] Token:", body.token);
 
-    // 1. Pega o token direto do corpo do JSON (como vimos no log)
+    // 1. Validação do Token
     const tokenEnviado = body.token;
-
     const TOKENS = {
       APPROVED: process.env.NEXANO_TOKEN_APPROVED,
       CANCELED: process.env.NEXANO_TOKEN_CANCELED,
@@ -26,66 +25,74 @@ export async function POST(request: Request) {
       DISPUTED: process.env.NEXANO_TOKEN_DISPUTED
     }
 
-    // Validação
     if (!tokenEnviado || !Object.values(TOKENS).includes(tokenEnviado)) {
-      console.error("ERRO 401: Token inválido. Recebemos:", tokenEnviado);
       return NextResponse.json({ error: 'Token inválido' }, { status: 401 });
     }
 
-    // 2. Mapeamento exato conforme o seu log
-    const email = body.client?.email;
-    const name = body.client?.name;
-    const cpf = body.client?.cpf;
+    // 2. CAPTURA REFORÇADA (Tenta ler 'client.email' e outras variações)
+    const email = body.client?.email || body.email || body.customer?.email || body.data?.email;
+    const name = body.client?.name || body.name || body.customer?.name || "Personal SyncPro";
+    const cpf = body.client?.cpf || body.cpf || body.customer?.document;
 
+    // Se o email ainda for nulo, vamos logar o body inteiro para ver o que houve
     if (!email) {
-      console.error("ERRO 400: Email ausente dentro do objeto 'client'.");
-      return NextResponse.json({ error: "Email ausente" }, { status: 400 });
+      console.error(">>> [ERRO] Não conseguimos achar o email no body:", JSON.stringify(body));
+      return NextResponse.json({ 
+        error: "Email ausente", 
+        estrutura_recebida: Object.keys(body) 
+      }, { status: 400 });
     }
 
-    // 3. Lógica de Status baseada no Token
+    // 3. Decisão de Ação
     if (tokenEnviado === TOKENS.APPROVED) {
-      console.log("Aprovando acesso para:", email);
       return await handleApproval(email, name, cpf);
     } else {
-      console.log("Suspendendo acesso para:", email);
       return await handleSuspension(email);
     }
 
   } catch (error: any) {
-    console.error("ERRO NO WEBHOOK:", error.message);
+    console.error(">>> [ERRO CRÍTICO]:", error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
 
 async function handleApproval(email: string, name: string, cpf: string) {
-  const password = cpf ? cpf.replace(/\D/g, '') : email.split('@')[0] + '123';
+  // Senha: CPF (apenas números). Se não tiver CPF, usa os 5 primeiros dígitos do email + 123
+  const password = cpf ? cpf.replace(/\D/g, '') : email.split('@')[0].substring(0,5) + '123';
   
+  // 1. Tenta criar o usuário no Auth
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
-    user_metadata: { full_name: name || 'Personal SyncPro' }
+    user_metadata: { full_name: name }
   });
 
+  // 2. Se o usuário já existir, apenas reativa
   if (authError && authError.message.includes('already exists')) {
      await supabaseAdmin.from('profiles').update({ status: 'active' }).eq('email', email);
      return NextResponse.json({ message: 'Acesso reativado' });
   }
 
+  if (authError) throw authError;
+
+  // 3. Se for novo, cria o perfil
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
-  await supabaseAdmin.from('profiles').insert({
+  const { error: profileError } = await supabaseAdmin.from('profiles').insert({
     id: authUser.user?.id,
-    full_name: name || 'Personal SyncPro',
+    full_name: name,
     role: 'personal',
     invite_code: inviteCode,
     status: 'active',
     email: email
   });
 
-  return NextResponse.json({ success: true });
+  if (profileError) throw profileError;
+
+  return NextResponse.json({ success: true, message: "Novo Personal cadastrado" });
 }
 
 async function handleSuspension(email: string) {
   await supabaseAdmin.from('profiles').update({ status: 'suspended' }).eq('email', email);
-  return NextResponse.json({ success: true });
+  return NextResponse.json({ success: true, message: "Acesso suspenso" });
 }
