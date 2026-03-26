@@ -10,12 +10,23 @@ const supabaseAdmin = createClient(
 
 export async function POST(request: Request) {
   try {
-    const tokenEnviado = request.headers.get('x-nexano-token');
+    // 1. CAPTURA DE TODOS OS HEADERS PARA DEBUG
+    const headersObj: any = {};
+    request.headers.forEach((value, key) => {
+      headersObj[key] = value;
+    });
+
     const body = await request.json();
 
-    // --- O MAPA DO PROBLEMA ---
-    // Esse log aqui é o mais importante. Ele vai imprimir o JSON inteiro na Vercel.
-    console.log(">>> PAYLOAD RECEBIDO:", JSON.stringify(body, null, 2));
+    // LOGS CRÍTICOS - VEJA NA VERCEL
+    console.log(">>> [DEBUG] TODOS OS HEADERS RECEBIDOS:", JSON.stringify(headersObj, null, 2));
+    console.log(">>> [DEBUG] BODY RECEBIDO:", JSON.stringify(body, null, 2));
+
+    // 2. TENTAR ENCONTRAR O TOKEN EM DIFERENTES LUGARES
+    const tokenEnviado = request.headers.get('x-nexano-token') || 
+                         request.headers.get('nexano-token') || 
+                         request.headers.get('authorization') ||
+                         body.token; // Algumas plataformas enviam dentro do JSON
 
     const TOKENS = {
       APPROVED: process.env.NEXANO_TOKEN_APPROVED,
@@ -24,40 +35,28 @@ export async function POST(request: Request) {
       DISPUTED: process.env.NEXANO_TOKEN_DISPUTED
     }
 
-    if (!Object.values(TOKENS).includes(tokenEnviado)) {
-      return NextResponse.json({ error: 'Token inválido' }, { status: 401 });
-    }
+    // 3. VALIDAÇÃO FLEXÍVEL
+    const isTokenValido = Object.values(TOKENS).includes(tokenEnviado);
 
-    // Tenta encontrar o email em TODAS as estruturas possíveis da Nexano
-    const email = body.email || 
-                  body.customer?.email || 
-                  body.data?.customer?.email || 
-                  body.data?.email || 
-                  body.payload?.customer?.email ||
-                  body.transaction?.customer?.email;
-
-    const name = body.name || 
-                 body.customer?.name || 
-                 body.data?.customer?.name || 
-                 body.data?.name ||
-                 body.payload?.customer?.name;
-
-    const cpf = body.cpf || 
-                body.customer?.document || 
-                body.data?.customer?.document || 
-                body.data?.cpf ||
-                body.payload?.customer?.document;
-
-    // Se mesmo assim não achar, vamos retornar o que recebemos para debugar
-    if (!email) {
-      console.error("ERRO: Email não encontrado. Chaves recebidas:", Object.keys(body));
+    if (!isTokenValido) {
+      console.error("ERRO 401: Token não autorizado. Recebido:", tokenEnviado);
       return NextResponse.json({ 
-        error: "Email ausente no payload", 
-        keys_recebidas: Object.keys(body) 
-      }, { status: 400 });
+        error: 'Token não autorizado', 
+        debug: {
+          recebido: tokenEnviado,
+          headers_keys: Object.keys(headersObj)
+        }
+      }, { status: 401 });
     }
 
-    // Lógica de Status
+    // 4. EXTRAÇÃO DE DADOS (EMAIL/NOME/CPF)
+    const email = body.email || body.customer?.email || body.data?.customer?.email || body.data?.email;
+    const name = body.name || body.customer?.name || body.data?.customer?.name || body.data?.name;
+    const cpf = body.cpf || body.customer?.document || body.data?.customer?.document || body.data?.cpf;
+
+    if (!email) return NextResponse.json({ error: "Email ausente" }, { status: 400 });
+
+    // 5. LÓGICA DE STATUS
     if (tokenEnviado === TOKENS.APPROVED) {
       return await handleApproval(email, name, cpf);
     } else {
@@ -70,31 +69,20 @@ export async function POST(request: Request) {
   }
 }
 
+// ... (mantenha as funções handleApproval e handleSuspension iguais às anteriores)
 async function handleApproval(email: string, name: string, cpf: string) {
   const password = cpf ? cpf.replace(/\D/g, '') : email.split('@')[0] + '123';
-  
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true,
-    user_metadata: { full_name: name || 'Personal SyncPro' }
+    email, password, email_confirm: true, user_metadata: { full_name: name || 'Personal SyncPro' }
   });
-
   if (authError && authError.message.includes('already exists')) {
      await supabaseAdmin.from('profiles').update({ status: 'active' }).eq('email', email);
-     return NextResponse.json({ message: 'Acesso reativado' });
+     return NextResponse.json({ message: 'Reativado' });
   }
-
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
   await supabaseAdmin.from('profiles').insert({
-    id: authUser.user?.id,
-    full_name: name || 'Personal SyncPro',
-    role: 'personal',
-    invite_code: inviteCode,
-    status: 'active',
-    email: email
+    id: authUser.user?.id, full_name: name || 'Personal SyncPro', role: 'personal', invite_code: inviteCode, status: 'active', email: email
   });
-
   return NextResponse.json({ success: true });
 }
 
