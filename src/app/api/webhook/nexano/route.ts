@@ -32,7 +32,8 @@ export async function POST(request: Request) {
     // 2. CAPTURA REFORÇADA (Tenta ler 'client.email' e outras variações)
     const email = body.client?.email || body.email || body.customer?.email || body.data?.email;
     const name = body.client?.name || body.name || body.customer?.name || "Personal SyncPro";
-    const cpf = body.client?.cpf || body.cpf || body.customer?.document;
+    const rawCpf = body.client?.cpf || body.cpf || body.customer?.document;
+    const cpf = rawCpf ? rawCpf.replace(/\D/g, '') : null;
 
     // Se o email ainda for nulo, vamos logar o body inteiro para ver o que houve
     if (!email) {
