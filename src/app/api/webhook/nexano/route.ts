@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server'
 
 export const dynamic = 'force-dynamic'
 
-// Cliente Admin para ignorar políticas de RLS no cadastro inicial
 const supabaseAdmin = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -12,9 +11,8 @@ const supabaseAdmin = createClient(
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-
-    // 1. Validação do Token (Extraído do corpo conforme o log real)
     const tokenEnviado = body.token;
+
     const TOKENS = {
       APPROVED: process.env.NEXANO_TOKEN_APPROVED,
       CANCELED: process.env.NEXANO_TOKEN_CANCELED,
@@ -23,23 +21,16 @@ export async function POST(request: Request) {
     }
 
     if (!tokenEnviado || !Object.values(TOKENS).includes(tokenEnviado)) {
-      console.error("Tentativa de acesso com token inválido:", tokenEnviado);
       return NextResponse.json({ error: 'Token não autorizado' }, { status: 401 });
     }
 
-    // 2. Captura de Dados (Focada na estrutura 'client' do seu log)
     const email = body.client?.email || body.email;
     const name = body.client?.name || "Personal SyncPro";
     const rawCpf = body.client?.cpf || body.cpf;
-    
-    // Limpa o CPF: mantém apenas números para evitar erros no banco
     const cpf = rawCpf ? rawCpf.replace(/\D/g, '') : null;
 
-    if (!email) {
-      return NextResponse.json({ error: "Email não encontrado no payload" }, { status: 400 });
-    }
+    if (!email) return NextResponse.json({ error: "Email ausente" }, { status: 400 });
 
-    // 3. Lógica de Decisão
     if (tokenEnviado === TOKENS.APPROVED) {
       return await handleApproval(email, name, cpf);
     } else {
@@ -47,62 +38,61 @@ export async function POST(request: Request) {
     }
 
   } catch (error: any) {
-    console.error("Erro interno no Webhook:", error.message);
+    console.error("ERRO WEBHOOK:", error.message);
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
 
-// FUNÇÃO PARA APROVAR/CRIAR ACESSO
 async function handleApproval(email: string, name: string, cpf: string | null) {
-  // Senha inicial: CPF (apenas números). Se não houver, usa prefixo do email.
   const temporaryPassword = cpf ? cpf : email.split('@')[0].substring(0, 6) + '123';
   
-  // Criar no Auth do Supabase
+  // 1. Tenta criar o usuário no Auth
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password: temporaryPassword,
     email_confirm: true,
-    user_metadata: { 
-      full_name: name,
-      cpf: cpf 
-    }
+    user_metadata: { full_name: name, cpf: cpf }
   });
 
-  // Se o usuário já existe, reativamos o perfil dele
-  if (authError && authError.message.includes('already exists')) {
-     const { error: updateError } = await supabaseAdmin
-       .from('profiles')
-       .update({ status: 'active', cpf: cpf })
-       .eq('email', email);
-     
-     if (updateError) throw updateError;
-     return NextResponse.json({ message: 'Acesso reativado com sucesso' });
+  let userId = authUser.user?.id;
+
+  // 2. TRATAMENTO DE ERRO: Usuário já registrado no Auth
+  if (authError) {
+    if (authError.message.includes('already been registered') || authError.message.includes('already exists')) {
+      // Se já existe no Auth, vamos buscar o ID dele para garantir o perfil
+      const { data: existingUsers, error: listError } = await supabaseAdmin.auth.admin.listUsers();
+      const user = existingUsers?.users.find(u => u.email === email);
+      
+      if (user) {
+        userId = user.id;
+      } else {
+        throw new Error("Erro ao recuperar usuário existente.");
+      }
+    } else {
+      throw authError;
+    }
   }
 
-  if (authError) throw authError;
-
-  // Criar o perfil na tabela 'profiles' para o novo usuário
+  // 3. UPSERT NO PROFILE (Cria se não existir, atualiza se existir)
+  // O 'upsert' resolve o problema de você ter apagado o registro manualmente
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
   
-  const { error: profileError } = await supabaseAdmin.from('profiles').insert({
-    id: authUser.user?.id,
+  const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
+    id: userId,
     email: email,
     full_name: name,
-    cpf: cpf, // Aqui o CPF será salvo como texto puro (apenas números)
+    cpf: cpf,
     role: 'personal',
-    invite_code: inviteCode,
-    status: 'active'
-  });
+    status: 'active',
+    // Só gera um novo invite_code se for um registro novo
+    invite_code: inviteCode 
+  }, { onConflict: 'id' });
 
-  if (profileError) {
-    console.error("Erro ao criar perfil no DB:", profileError.message);
-    throw profileError;
-  }
+  if (profileError) throw profileError;
 
-  return NextResponse.json({ success: true, message: "Usuário e perfil criados" });
+  return NextResponse.json({ success: true, message: "Acesso processado com sucesso" });
 }
 
-// FUNÇÃO PARA SUSPENDER ACESSO
 async function handleSuspension(email: string) {
   const { error } = await supabaseAdmin
     .from('profiles')
@@ -110,5 +100,5 @@ async function handleSuspension(email: string) {
     .eq('email', email);
 
   if (error) throw error;
-  return NextResponse.json({ success: true, message: "Acesso suspenso" });
+  return NextResponse.json({ success: true });
 }
