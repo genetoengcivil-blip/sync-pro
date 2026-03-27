@@ -46,35 +46,30 @@ export async function POST(request: Request) {
 async function handleApproval(email: string, name: string, cpf: string | null) {
   const temporaryPassword = cpf ? cpf : email.split('@')[0].substring(0, 6) + '123';
   
-  // 1. Tenta criar o usuário no Auth
+  // 1. Tenta criar o usuário no Auth com a flag 'first_access'
   const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.createUser({
     email,
     password: temporaryPassword,
     email_confirm: true,
-    user_metadata: { full_name: name, cpf: cpf }
+    user_metadata: { 
+      full_name: name, 
+      cpf: cpf,
+      first_access: true // Marcação para o Dashboard saber que deve trocar a senha
+    }
   });
 
   let userId = authUser.user?.id;
 
-  // 2. TRATAMENTO DE ERRO: Usuário já registrado no Auth
   if (authError) {
     if (authError.message.includes('already been registered') || authError.message.includes('already exists')) {
-      // Se já existe no Auth, vamos buscar o ID dele para garantir o perfil
-      const { data: existingUsers, error: listError } = await supabaseAdmin.auth.admin.listUsers();
+      const { data: existingUsers } = await supabaseAdmin.auth.admin.listUsers();
       const user = existingUsers?.users.find(u => u.email === email);
-      
-      if (user) {
-        userId = user.id;
-      } else {
-        throw new Error("Erro ao recuperar usuário existente.");
-      }
+      if (user) userId = user.id;
     } else {
       throw authError;
     }
   }
 
-  // 3. UPSERT NO PROFILE (Cria se não existir, atualiza se existir)
-  // O 'upsert' resolve o problema de você ter apagado o registro manualmente
   const inviteCode = Math.random().toString(36).substring(2, 8).toUpperCase();
   
   const { error: profileError } = await supabaseAdmin.from('profiles').upsert({
@@ -84,21 +79,15 @@ async function handleApproval(email: string, name: string, cpf: string | null) {
     cpf: cpf,
     role: 'personal',
     status: 'active',
-    // Só gera um novo invite_code se for um registro novo
     invite_code: inviteCode 
   }, { onConflict: 'id' });
 
   if (profileError) throw profileError;
 
-  return NextResponse.json({ success: true, message: "Acesso processado com sucesso" });
+  return NextResponse.json({ success: true, message: "Acesso processado" });
 }
 
 async function handleSuspension(email: string) {
-  const { error } = await supabaseAdmin
-    .from('profiles')
-    .update({ status: 'suspended' })
-    .eq('email', email);
-
-  if (error) throw error;
+  await supabaseAdmin.from('profiles').update({ status: 'suspended' }).eq('email', email);
   return NextResponse.json({ success: true });
 }

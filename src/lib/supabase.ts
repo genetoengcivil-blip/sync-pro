@@ -1,7 +1,23 @@
-import { createClient } from '@supabase/supabase-js';
+// Este arquivo serve como ponte de compatibilidade para código existente
+// Para novos código, use importações específicas de @/lib/supabase/client
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+import { createBrowserClient } from '@supabase/ssr'
 
-// Criamos uma única instância do cliente para ser exportada e usada em todo o app
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
+// Cliente singleton para uso em componentes client
+let client: ReturnType<typeof createBrowserClient> | null = null
+
+const getClient = () => {
+  if (!client) {
+    client = createBrowserClient(
+      process.env.NEXT_PUBLIC_SUPABASE_URL!,
+      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+    )
+  }
+  return client
+}
+
+// Exporta como supabase para compatibilidade com código existente
+export const supabase = getClient()
+
+// Também exporta como default para quem preferir
+export default getClient()
